@@ -5,11 +5,12 @@ import urllib.parse
 import base64
 import re
 import argparse
+import ssl
 from typing import List, Dict, Any
 import json
 
 class NexusDockerSearch:
-    def __init__(self, nexus_url: str, username: str, password: str, repository: str):
+    def __init__(self, nexus_url: str, username: str, password: str, repository: str, verify_ssl: bool = True):
         """Initialize the Nexus Docker Search client.
         
         Args:
@@ -17,11 +18,13 @@ class NexusDockerSearch:
             username: Nexus username
             password: Nexus password
             repository: Name of the Docker repository to search in
+            verify_ssl: Whether to verify SSL certificates (default: True)
         """
         self.nexus_url = nexus_url.rstrip('/')
         self.username = username
         self.password = password
         self.repository = repository
+        self.verify_ssl = verify_ssl
         # Create basic auth header
         credentials = f"{username}:{password}".encode('utf-8')
         self.auth_header = f"Basic {base64.b64encode(credentials).decode('utf-8')}"
@@ -43,8 +46,13 @@ class NexusDockerSearch:
         request = urllib.request.Request(url)
         request.add_header("Authorization", self.auth_header)
         
+        # Create SSL context if needed
+        context = None
+        if not self.verify_ssl and url.startswith('https://'):
+            context = ssl._create_unverified_context()
+        
         try:
-            with urllib.request.urlopen(request) as response:
+            with urllib.request.urlopen(request, context=context) as response:
                 return json.loads(response.read().decode('utf-8'))
         except urllib.error.HTTPError as e:
             raise Exception(f"HTTP Error {e.code}: {e.reason}")
@@ -102,13 +110,20 @@ def main():
     parser.add_argument("--username", default="admin", help="Nexus username")
     parser.add_argument("--password", default="admin", help="Nexus password")
     parser.add_argument("--repository", default="my-private-docker-repo", help="Docker repository name")
+    parser.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL certificate verification")
     parser.add_argument("patterns", nargs="+", help="Regex patterns to match against image names")
     parser.add_argument("--output", "-o", help="Output file for results (JSON format)")
     
     args = parser.parse_args()
     
     try:
-        client = NexusDockerSearch(args.url, args.username, args.password, args.repository)
+        client = NexusDockerSearch(
+            args.url, 
+            args.username, 
+            args.password, 
+            args.repository,
+            verify_ssl=not args.no_verify_ssl
+        )
         results = client.search_components(args.patterns)
         
         # Print results

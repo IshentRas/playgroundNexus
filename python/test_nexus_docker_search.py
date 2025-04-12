@@ -8,6 +8,7 @@ import base64
 import os
 import sys
 import urllib.error
+import ssl
 
 # Add the parent directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,6 +44,19 @@ class TestNexusDockerSearch(unittest.TestCase):
         expected_auth = f"Basic {base64.b64encode(b'testuser:testpass').decode('utf-8')}"
         self.assertEqual(self.client.auth_header, expected_auth)
 
+        # Test SSL verification default
+        self.assertTrue(self.client.verify_ssl)
+
+        # Test SSL verification disabled
+        client_no_ssl = NexusDockerSearch(
+            self.nexus_url,
+            self.username,
+            self.password,
+            self.repository,
+            verify_ssl=False
+        )
+        self.assertFalse(client_no_ssl.verify_ssl)
+
     @patch('urllib.request.urlopen')
     def test_make_request(self, mock_urlopen):
         """Test _make_request method"""
@@ -64,6 +78,45 @@ class TestNexusDockerSearch(unittest.TestCase):
         for call in calls:
             request = call[0][0]
             self.assertEqual(request.get_header("Authorization"), self.client.auth_header)
+
+    @patch('urllib.request.urlopen')
+    def test_make_request_https(self, mock_urlopen):
+        """Test _make_request method with HTTPS"""
+        # Mock response
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"test": "data"}).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        # Test with SSL verification enabled
+        client_ssl = NexusDockerSearch(
+            "https://test.nexus",
+            self.username,
+            self.password,
+            self.repository,
+            verify_ssl=True
+        )
+        result = client_ssl._make_request("https://test.url", {})
+        self.assertEqual(result, {"test": "data"})
+        
+        # Verify no SSL context was passed
+        mock_urlopen.assert_called_with(ANY, context=None)
+
+        # Test with SSL verification disabled
+        client_no_ssl = NexusDockerSearch(
+            "https://test.nexus",
+            self.username,
+            self.password,
+            self.repository,
+            verify_ssl=False
+        )
+        result = client_no_ssl._make_request("https://test.url", {})
+        self.assertEqual(result, {"test": "data"})
+        
+        # Verify unverified SSL context was passed
+        mock_urlopen.assert_called_with(ANY, context=ANY)
+        context = mock_urlopen.call_args[1]['context']
+        self.assertIsInstance(context, ssl.SSLContext)
+        self.assertFalse(context.verify_mode)
 
     @patch('urllib.request.urlopen')
     def test_search_components(self, mock_urlopen):
