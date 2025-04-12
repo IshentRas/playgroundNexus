@@ -17,159 +17,147 @@ from python.nexus_docker_search import NexusDockerSearch
 
 class TestNexusDockerSearch(unittest.TestCase):
     def setUp(self):
-        """Set up test fixtures"""
-        self.nexus_url = "http://test.nexus"
-        self.username = "testuser"
-        self.password = "testpass"
-        self.repository = "test-repo"
-        self.client = NexusDockerSearch(
-            self.nexus_url,
-            self.username,
-            self.password,
-            self.repository
-        )
-
-    def test_init(self):
-        """Test initialization of NexusDockerSearch"""
-        # Test URL handling
-        client = NexusDockerSearch(
-            "http://test.nexus/",  # with trailing slash
-            self.username,
-            self.password,
-            self.repository
-        )
-        self.assertEqual(client.nexus_url, "http://test.nexus")
+        """Set up test fixtures."""
+        self.nexus_url = "http://localhost:8081"
+        self.repository = "my-private-docker-repo"
+        self.username = "admin"
+        self.password = "admin"
         
-        # Test auth header generation
-        expected_auth = f"Basic {base64.b64encode(b'testuser:testpass').decode('utf-8')}"
-        self.assertEqual(self.client.auth_header, expected_auth)
-
-        # Test SSL verification default
-        self.assertTrue(self.client.verify_ssl)
-
-        # Test SSL verification disabled
-        client_no_ssl = NexusDockerSearch(
-            self.nexus_url,
-            self.username,
-            self.password,
-            self.repository,
-            verify_ssl=False
-        )
-        self.assertFalse(client_no_ssl.verify_ssl)
-
-    @patch('urllib.request.urlopen')
-    def test_make_request(self, mock_urlopen):
-        """Test _make_request method"""
-        # Mock response
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({"test": "data"}).encode('utf-8')
-        mock_urlopen.return_value.__enter__.return_value = mock_response
-
-        # Test request without params
-        result = self.client._make_request("http://test.url", {})
-        self.assertEqual(result, {"test": "data"})
-
-        # Test request with params
-        result = self.client._make_request("http://test.url", {"param": "value"})
-        self.assertEqual(result, {"test": "data"})
-
-        # Verify authorization header
-        calls = mock_urlopen.call_args_list
-        for call in calls:
-            request = call[0][0]
-            self.assertEqual(request.get_header("Authorization"), self.client.auth_header)
-
-    @patch('urllib.request.urlopen')
-    def test_make_request_https(self, mock_urlopen):
-        """Test _make_request method with HTTPS"""
-        # Mock response
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({"test": "data"}).encode('utf-8')
-        mock_urlopen.return_value.__enter__.return_value = mock_response
-
-        # Test with SSL verification enabled
-        client_ssl = NexusDockerSearch(
-            "https://test.nexus",
-            self.username,
-            self.password,
-            self.repository,
-            verify_ssl=True
-        )
-        result = client_ssl._make_request("https://test.url", {})
-        self.assertEqual(result, {"test": "data"})
+        # Mock responses
+        self.mock_catalog_response = {
+            "repositories": [
+                "test/image1",
+                "test/image2",
+                "other/image3"
+            ]
+        }
         
-        # Verify no SSL context was passed
-        mock_urlopen.assert_called_with(ANY, context=None)
-
-        # Test with SSL verification disabled
-        client_no_ssl = NexusDockerSearch(
-            "https://test.nexus",
-            self.username,
-            self.password,
-            self.repository,
-            verify_ssl=False
-        )
-        result = client_no_ssl._make_request("https://test.url", {})
-        self.assertEqual(result, {"test": "data"})
+        self.mock_tags_response = {
+            "name": "test/image1",
+            "tags": ["latest", "v1.0", "v1.1"]
+        }
         
-        # Verify unverified SSL context was passed
-        mock_urlopen.assert_called_with(ANY, context=ANY)
-        context = mock_urlopen.call_args[1]['context']
-        self.assertIsInstance(context, ssl.SSLContext)
-        self.assertFalse(context.verify_mode)
-
-    @patch('urllib.request.urlopen')
-    def test_search_components(self, mock_urlopen):
-        """Test search_components method"""
-        # Mock paginated responses
-        responses = [
-            {
-                "items": [
-                    {"name": "test/image1", "version": "1.0", "assets": [{"checksum": {"sha256": "abc123"}}]},
-                    {"name": "other/image", "version": "2.0", "assets": [{"checksum": {"sha256": "def456"}}]}
-                ],
-                "continuationToken": "token1"
-            },
-            {
-                "items": [
-                    {"name": "test/image2", "version": "3.0", "assets": [{"checksum": {"sha256": "ghi789"}}]}
-                ],
-                "continuationToken": None
+        self.mock_manifest_response = {
+            "config": {
+                "digest": "sha256:1234567890abcdef"
             }
-        ]
+        }
 
-        def side_effect(*args, **kwargs):
-            response = MagicMock()
-            response.read.return_value = json.dumps(responses.pop(0)).encode('utf-8')
-            return response
+    def test_init_without_auth(self):
+        """Test initialization without authentication."""
+        client = NexusDockerSearch(self.nexus_url, self.repository)
+        self.assertEqual(client.nexus_url, f"{self.nexus_url}/repository/{self.repository}")
+        self.assertIsNone(client.username)
+        self.assertIsNone(client.password)
+        self.assertIsNone(client.auth_header)
 
-        mock_urlopen.return_value.__enter__.side_effect = side_effect
-
-        # Test with pattern matching 'test/*'
-        results = self.client.search_components(["test/.*"])
-        
-        self.assertEqual(len(results), 2)
-        self.assertEqual(results[0]["name"], "test/image1")
-        self.assertEqual(results[0]["version"], "1.0")
-        self.assertEqual(results[0]["sha256"], "abc123")
-        self.assertEqual(results[1]["name"], "test/image2")
+    def test_init_with_auth(self):
+        """Test initialization with authentication."""
+        client = NexusDockerSearch(self.nexus_url, self.repository, self.username, self.password)
+        self.assertEqual(client.nexus_url, f"{self.nexus_url}/repository/{self.repository}")
+        self.assertEqual(client.username, self.username)
+        self.assertEqual(client.password, self.password)
+        self.assertIsNotNone(client.auth_header)
 
     @patch('urllib.request.urlopen')
-    def test_error_handling(self, mock_urlopen):
-        """Test error handling"""
-        # Test HTTP error
-        mock_urlopen.side_effect = urllib.error.HTTPError(
-            "http://test.url", 404, "Not Found", None, None
-        )
-        with self.assertRaises(Exception) as context:
-            self.client._make_request("http://test.url", {})
-        self.assertTrue("HTTP Error 404" in str(context.exception))
+    def test_make_request_without_auth(self, mock_urlopen):
+        """Test making a request without authentication."""
+        # Setup mock response
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"test": "data"}).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+        
+        client = NexusDockerSearch(self.nexus_url, self.repository)
+        response = client._make_request("http://test.com")
+        
+        # Verify request was made without auth header
+        mock_urlopen.assert_called_once()
+        request = mock_urlopen.call_args[0][0]
+        self.assertNotIn("Authorization", request.headers)
+        self.assertEqual(response, {"test": "data"})
 
-        # Test URL error
-        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+    @patch('urllib.request.urlopen')
+    def test_make_request_with_auth(self, mock_urlopen):
+        """Test making a request with authentication."""
+        # Setup mock response
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"test": "data"}).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+        
+        client = NexusDockerSearch(self.nexus_url, self.repository, self.username, self.password)
+        response = client._make_request("http://test.com")
+        
+        # Verify request was made with auth header
+        mock_urlopen.assert_called_once()
+        request = mock_urlopen.call_args[0][0]
+        self.assertIn("Authorization", request.headers)
+        self.assertEqual(response, {"test": "data"})
+
+    @patch('urllib.request.urlopen')
+    def test_search_images(self, mock_urlopen):
+        """Test searching for images."""
+        # Setup mock responses
+        mock_response = MagicMock()
+        mock_response.read.side_effect = [
+            json.dumps(self.mock_catalog_response).encode('utf-8'),  # Catalog response
+            json.dumps(self.mock_tags_response).encode('utf-8'),     # Tags for test/image1
+            json.dumps(self.mock_manifest_response).encode('utf-8'), # Manifest for test/image1:latest
+            json.dumps(self.mock_tags_response).encode('utf-8'),     # Tags for test/image2
+            json.dumps(self.mock_manifest_response).encode('utf-8')  # Manifest for test/image2:latest
+        ]
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+        
+        client = NexusDockerSearch(self.nexus_url, self.repository)
+        results = client.search_images(["test/.*"])
+        
+        # Verify results
+        self.assertEqual(len(results), 2)  # Should match test/image1 and test/image2
+        self.assertEqual(results[0]["name"], "test/image1")
+        self.assertEqual(results[0]["version"], "latest")
+        self.assertEqual(results[0]["sha256"], "1234567890abcdef")
+        self.assertEqual(results[1]["name"], "test/image2")
+        self.assertEqual(results[1]["version"], "latest")
+        self.assertEqual(results[1]["sha256"], "1234567890abcdef")
+
+    @patch('urllib.request.urlopen')
+    def test_get_image_tags(self, mock_urlopen):
+        """Test getting tags for an image."""
+        # Setup mock response
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(self.mock_tags_response).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+        
+        client = NexusDockerSearch(self.nexus_url, self.repository)
+        tags = client.get_image_tags("test/image1")
+        
+        # Verify tags
+        self.assertEqual(tags, ["latest", "v1.0", "v1.1"])
+
+    @patch('urllib.request.urlopen')
+    def test_http_error_handling(self, mock_urlopen):
+        """Test handling of HTTP errors."""
+        # Setup mock to raise HTTPError
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "http://test.com", 404, "Not Found", {}, None
+        )
+        
+        client = NexusDockerSearch(self.nexus_url, self.repository)
         with self.assertRaises(Exception) as context:
-            self.client._make_request("http://test.url", {})
-        self.assertTrue("URL Error" in str(context.exception))
+            client._make_request("http://test.com")
+        
+        self.assertIn("HTTP Error 404", str(context.exception))
+
+    @patch('urllib.request.urlopen')
+    def test_url_error_handling(self, mock_urlopen):
+        """Test handling of URL errors."""
+        # Setup mock to raise URLError
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+        
+        client = NexusDockerSearch(self.nexus_url, self.repository)
+        with self.assertRaises(Exception) as context:
+            client._make_request("http://test.com")
+        
+        self.assertIn("URL Error", str(context.exception))
 
 if __name__ == '__main__':
     unittest.main() 
