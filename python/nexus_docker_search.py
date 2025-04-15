@@ -9,6 +9,7 @@ import ssl
 import logging
 from typing import List, Dict, Any
 import json
+from collections import defaultdict
 
 class NexusDockerSearch:
     def __init__(self, nexus_url: str, repository: str, username: str = None, password: str = None, verify_ssl: bool = True, verbose: bool = False):
@@ -174,8 +175,123 @@ class NexusDockerSearch:
                 logging.error(f"Failed to search images: {e}")
             return []
 
+    def filter_tags(self, tags: List[str], latest_digest: str, version_digest: str) -> List[str]:
+        """Filter and sort tags for an image.
+        
+        Args:
+            tags: List of tags to filter
+            latest_digest: SHA256 digest of the latest tag
+            version_digest: SHA256 digest of the version tag
+            
+        Returns:
+            List of filtered and sorted tags
+        """
+        if not tags:
+            return []
+        
+        # Separate latest tag from other tags
+        version_tags = [tag for tag in tags if tag != "latest"]
+        
+        # Sort version tags numerically
+        def sort_key(tag):
+            try:
+                return int(tag)
+            except ValueError:
+                return 0
+                
+        version_tags.sort(key=sort_key, reverse=True)
+        
+        # Take only the last 2 valid tags
+        version_tags = version_tags[:2]
+        
+        # If latest tag exists and matches the highest version, include it
+        if "latest" in tags and latest_digest and version_digest:
+            if latest_digest == version_digest:
+                return ["latest"] + version_tags
+                
+        return version_tags
+
+    def process_images(self, images: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+        """Process a list of images and their tags.
+        
+        Args:
+            images: List of image information from search results
+            
+        Returns:
+            Dictionary with image names as keys and filtered tag lists as values
+        """
+        if self.verbose:
+            logging.info("Processing and filtering image tags")
+            
+        # Group images by name
+        image_groups = defaultdict(list)
+        for image in images:
+            name = image["name"]
+            version = image["version"]
+            sha256 = image["sha256"]
+            image_groups[name].append({"version": version, "sha256": sha256})
+        
+        # Process each group
+        results = {}
+        for name, versions in image_groups.items():
+            if self.verbose:
+                logging.info(f"Processing tags for image: {name}")
+                
+            # Get all versions and their digests
+            tags = []
+            latest_digest = None
+            version_digest = None
+            highest_version = None
+            
+            for version_info in versions:
+                version = version_info["version"]
+                sha256 = version_info["sha256"]
+                tags.append(version)
+                
+                if version == "latest":
+                    latest_digest = sha256
+                elif version.isdigit():
+                    version_num = int(version)
+                    if highest_version is None or version_num > highest_version:
+                        highest_version = version_num
+                        version_digest = sha256
+            
+            # Filter and sort tags
+            filtered_tags = self.filter_tags(tags, latest_digest, version_digest)
+            
+            if self.verbose:
+                logging.info(f"Filtered tags for {name}: {filtered_tags}")
+            
+            # Add to results
+            results[name] = filtered_tags
+        
+        return results
+
+    def search_and_filter_images(self, patterns: List[str]) -> Dict[str, List[str]]:
+        """Search for Docker images and filter their tags in one operation.
+        
+        Args:
+            patterns: List of regex patterns to match against image names
+            
+        Returns:
+            Dictionary with image names as keys and filtered tag lists as values
+        """
+        if self.verbose:
+            logging.info("Starting combined search and filter operation")
+            
+        # First search for images
+        images = self.search_images(patterns)
+        
+        if not images:
+            if self.verbose:
+                logging.warning("No images found matching the patterns")
+            return {}
+            
+        # Then process and filter the tags
+        return self.process_images(images)
+
 def main():
-    parser = argparse.ArgumentParser(description="Search for Docker images in Nexus using regex patterns")
+    parser = argparse.ArgumentParser(description="Search for Docker images in Nexus and filter their tags")
     parser.add_argument("--url", default="http://localhost:8081", help="Nexus server URL")
     parser.add_argument("--username", help="Nexus username (optional)")
     parser.add_argument("--password", help="Nexus password (optional)")
@@ -183,6 +299,7 @@ def main():
     parser.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL certificate verification")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     parser.add_argument("patterns", nargs="+", help="Regex patterns to match against image names")
+    parser.add_argument("--raw", action="store_true", help="Output raw search results without filtering")
     parser.add_argument("--output", "-o", help="Output file for results (JSON format)")
     
     args = parser.parse_args()
@@ -208,14 +325,22 @@ def main():
             verify_ssl=not args.no_verify_ssl,
             verbose=args.verbose
         )
-        results = client.search_images(args.patterns)
         
-        # Print results
-        print(f"\nFound {len(results)} matching images:")
-        for result in results:
-            print(f"\nImage: {result['name']}")
-            print(f"Version: {result['version']}")
-            print(f"SHA256: {result['sha256']}")
+        if args.raw:
+            # Get raw search results
+            results = client.search_images(args.patterns)
+            print(f"\nFound {len(results)} matching images:")
+            for result in results:
+                print(f"\nImage: {result['name']}")
+                print(f"Version: {result['version']}")
+                print(f"SHA256: {result['sha256']}")
+        else:
+            # Get filtered results
+            results = client.search_and_filter_images(args.patterns)
+            print(f"\nFound {len(results)} matching images:")
+            for name, tags in results.items():
+                print(f"\nImage: {name}")
+                print(f"Tags: {', '.join(tags)}")
         
         # Save to file if specified
         if args.output:
