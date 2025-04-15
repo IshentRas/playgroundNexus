@@ -101,76 +101,68 @@ class NexusDockerSearch:
         if self.verbose:
             logging.info(f"Searching for patterns: {patterns}")
             
-        # Build search parameters
-        params = {
+        # Build base search parameters
+        base_params = {
             "repository": self.repository,
             "format": "docker"
         }
         
-        # Add name pattern if only one pattern is provided
-        if len(patterns) == 1:
-            params["name"] = patterns[0]
-            if self.verbose:
-                logging.info(f"Using exact name pattern: {patterns[0]}")
-        
-        if self.verbose:
-            logging.info("Fetching components from search API")
-            logging.info(f"Parameters: {params}")
-        
         try:
-            # Get all components and filter by pattern if multiple patterns provided
+            # Get all components for each pattern
             matching_images = []
-            continuation_token = None
+            seen_images = set()  # Track unique images by name:version
             
-            while True:
-                if continuation_token:
-                    params["continuationToken"] = continuation_token
-                    if self.verbose:
-                        logging.info(f"Fetching next page with token: {continuation_token}")
-                
-                data = self._make_request(self.nexus_url, params)
-                
+            for pattern in patterns:
                 if self.verbose:
-                    logging.info(f"Found {len(data.get('items', []))} components in current page")
+                    logging.info(f"Searching with pattern: {pattern}")
                 
-                # Filter components by pattern if multiple patterns provided
-                if len(patterns) > 1:
-                    compiled_patterns = [re.compile(pattern) for pattern in patterns]
+                # Add pattern to parameters
+                params = base_params.copy()
+                params["name"] = pattern
+                
+                continuation_token = None
+                while True:
+                    if continuation_token:
+                        params["continuationToken"] = continuation_token
+                        if self.verbose:
+                            logging.info(f"Fetching next page with token: {continuation_token}")
+                    
+                    data = self._make_request(self.nexus_url, params)
+                    
+                    if self.verbose:
+                        logging.info(f"Found {len(data.get('items', []))} components in current page")
+                    
+                    # Process components
                     for component in data.get("items", []):
                         name = component.get("name", "")
-                        if any(pattern.search(name) for pattern in compiled_patterns):
+                        version = component.get("version", "")
+                        image_key = f"{name}:{version}"
+                        
+                        # Skip if we've already seen this image:version
+                        if image_key in seen_images:
                             if self.verbose:
-                                logging.info(f"Found matching image: {name}")
-                            
-                            # Get SHA256 from assets
-                            sha256 = component.get("assets", [{}])[0].get("checksum", {}).get("sha256", "")
-                            
-                            matching_images.append({
-                                "name": name,
-                                "version": component.get("version", ""),
-                                "sha256": sha256
-                            })
-                else:
-                    # No need to filter if using exact name pattern
-                    for component in data.get("items", []):
+                                logging.info(f"Skipping duplicate image: {image_key}")
+                            continue
+                        
+                        seen_images.add(image_key)
                         if self.verbose:
-                            logging.info(f"Found image: {component.get('name', '')}")
+                            logging.info(f"Found image: {name}")
                         
                         # Get SHA256 from assets
                         sha256 = component.get("assets", [{}])[0].get("checksum", {}).get("sha256", "")
                         
                         matching_images.append({
-                            "name": component.get("name", ""),
-                            "version": component.get("version", ""),
+                            "name": name,
+                            "version": version,
                             "sha256": sha256
                         })
-                
-                # Check if there are more results
-                continuation_token = data.get("continuationToken")
-                if not continuation_token:
-                    if self.verbose:
-                        logging.info("No more pages to fetch")
-                    break
+                    
+                    # Check if there are more results
+                    continuation_token = data.get("continuationToken")
+                    if not continuation_token:
+                        if self.verbose:
+                            logging.info("No more pages to fetch")
+                        break
             
             if self.verbose:
                 logging.info(f"Total matching images found: {len(matching_images)}")

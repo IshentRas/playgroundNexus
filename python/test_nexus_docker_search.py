@@ -54,7 +54,7 @@ class TestNexusDockerSearch(unittest.TestCase):
         }
         
         # Mock responses for multiple pattern search
-        self.mock_multiple_pattern_response = {
+        self.mock_pattern1_response = {
             "items": [
                 {
                     "name": "test/image1",
@@ -66,7 +66,12 @@ class TestNexusDockerSearch(unittest.TestCase):
                             }
                         }
                     ]
-                },
+                }
+            ]
+        }
+        
+        self.mock_pattern2_response = {
+            "items": [
                 {
                     "name": "test/image2",
                     "version": "v1.0",
@@ -77,14 +82,20 @@ class TestNexusDockerSearch(unittest.TestCase):
                             }
                         }
                     ]
-                },
+                }
+            ]
+        }
+        
+        # Mock response with duplicate image
+        self.mock_duplicate_response = {
+            "items": [
                 {
-                    "name": "other/image3",
+                    "name": "test/image1",
                     "version": "latest",
                     "assets": [
                         {
                             "checksum": {
-                                "sha256": "ghi789"
+                                "sha256": "abc123"
                             }
                         }
                     ]
@@ -185,9 +196,12 @@ class TestNexusDockerSearch(unittest.TestCase):
 
     @patch('urllib.request.urlopen')
     def test_search_images_multiple_patterns(self, mock_urlopen):
-        # Setup mock response
+        # Setup mock responses for each pattern
         mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps(self.mock_multiple_pattern_response).encode('utf-8')
+        mock_response.read.side_effect = [
+            json.dumps(self.mock_pattern1_response).encode('utf-8'),
+            json.dumps(self.mock_pattern2_response).encode('utf-8')
+        ]
         mock_urlopen.return_value.__enter__.return_value = mock_response
         
         # Initialize client
@@ -215,14 +229,55 @@ class TestNexusDockerSearch(unittest.TestCase):
         self.assertEqual(results[1]["version"], "v1.0")
         self.assertEqual(results[1]["sha256"], "def456")
         
-        # Verify URL was called with correct parameters
-        mock_urlopen.assert_called_once()
-        call_args = mock_urlopen.call_args[0][0]
+        # Verify URL was called twice with correct parameters
+        self.assertEqual(mock_urlopen.call_count, 2)
+        
+        # First call
+        call_args = mock_urlopen.call_args_list[0][0][0]
         parsed_url = urllib.parse.urlparse(call_args.full_url)
         query_params = urllib.parse.parse_qs(parsed_url.query)
-        self.assertNotIn("name", query_params)  # No name parameter for multiple patterns
+        self.assertEqual(query_params["name"][0], "test/image1")
         self.assertEqual(query_params["repository"][0], "docker-hosted")
         self.assertEqual(query_params["format"][0], "docker")
+        
+        # Second call
+        call_args = mock_urlopen.call_args_list[1][0][0]
+        parsed_url = urllib.parse.urlparse(call_args.full_url)
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        self.assertEqual(query_params["name"][0], "test/image2")
+        self.assertEqual(query_params["repository"][0], "docker-hosted")
+        self.assertEqual(query_params["format"][0], "docker")
+
+    @patch('urllib.request.urlopen')
+    def test_search_images_duplicates(self, mock_urlopen):
+        # Setup mock responses with duplicate image
+        mock_response = MagicMock()
+        mock_response.read.side_effect = [
+            json.dumps(self.mock_pattern1_response).encode('utf-8'),
+            json.dumps(self.mock_duplicate_response).encode('utf-8')
+        ]
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+        
+        # Initialize client
+        client = NexusDockerSearch(
+            self.nexus_url,
+            self.repository,
+            self.username,
+            self.password,
+            verbose=self.verbose
+        )
+        
+        # Test search with patterns that would return duplicate images
+        results = client.search_images(["test/image1", "test/image.*"])
+        
+        # Verify only one instance of the duplicate image is returned
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["name"], "test/image1")
+        self.assertEqual(results[0]["version"], "latest")
+        self.assertEqual(results[0]["sha256"], "abc123")
+        
+        # Verify URL was called twice
+        self.assertEqual(mock_urlopen.call_count, 2)
 
     @patch('urllib.request.urlopen')
     def test_search_images_no_matches(self, mock_urlopen):
