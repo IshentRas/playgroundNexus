@@ -9,6 +9,7 @@ import os
 import sys
 import urllib.error
 import ssl
+import urllib.parse
 
 # Add the parent directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,35 +19,83 @@ from python.nexus_docker_search import NexusDockerSearch
 class TestNexusDockerSearch(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
-        self.nexus_url = "http://localhost:8081"
-        self.repository = "my-private-docker-repo"
+        self.nexus_url = "http://nexus.example.com"
+        self.repository = "docker-hosted"
         self.username = "admin"
-        self.password = "admin"
+        self.password = "password"
+        self.verbose = True
         
-        # Mock responses
-        self.mock_catalog_response = {
-            "repositories": [
-                "test/image1",
-                "test/image2",
-                "other/image3"
+        # Mock responses for single pattern search
+        self.mock_single_pattern_response = {
+            "items": [
+                {
+                    "name": "test/image1",
+                    "version": "latest",
+                    "assets": [
+                        {
+                            "checksum": {
+                                "sha256": "abc123"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "test/image2",
+                    "version": "v1.0",
+                    "assets": [
+                        {
+                            "checksum": {
+                                "sha256": "def456"
+                            }
+                        }
+                    ]
+                }
             ]
         }
         
-        self.mock_tags_response = {
-            "name": "test/image1",
-            "tags": ["latest", "v1.0", "v1.1"]
-        }
-        
-        self.mock_manifest_response = {
-            "config": {
-                "digest": "sha256:1234567890abcdef"
-            }
+        # Mock responses for multiple pattern search
+        self.mock_multiple_pattern_response = {
+            "items": [
+                {
+                    "name": "test/image1",
+                    "version": "latest",
+                    "assets": [
+                        {
+                            "checksum": {
+                                "sha256": "abc123"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "test/image2",
+                    "version": "v1.0",
+                    "assets": [
+                        {
+                            "checksum": {
+                                "sha256": "def456"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "other/image3",
+                    "version": "latest",
+                    "assets": [
+                        {
+                            "checksum": {
+                                "sha256": "ghi789"
+                            }
+                        }
+                    ]
+                }
+            ]
         }
 
     def test_init_without_auth(self):
         """Test initialization without authentication."""
         client = NexusDockerSearch(self.nexus_url, self.repository)
-        self.assertEqual(client.nexus_url, f"{self.nexus_url}/repository/{self.repository}")
+        self.assertEqual(client.nexus_url, f"{self.nexus_url}/service/rest/v1/search")
         self.assertIsNone(client.username)
         self.assertIsNone(client.password)
         self.assertIsNone(client.auth_header)
@@ -54,7 +103,7 @@ class TestNexusDockerSearch(unittest.TestCase):
     def test_init_with_auth(self):
         """Test initialization with authentication."""
         client = NexusDockerSearch(self.nexus_url, self.repository, self.username, self.password)
-        self.assertEqual(client.nexus_url, f"{self.nexus_url}/repository/{self.repository}")
+        self.assertEqual(client.nexus_url, f"{self.nexus_url}/service/rest/v1/search")
         self.assertEqual(client.username, self.username)
         self.assertEqual(client.password, self.password)
         self.assertIsNotNone(client.auth_header)
@@ -94,44 +143,137 @@ class TestNexusDockerSearch(unittest.TestCase):
         self.assertEqual(response, {"test": "data"})
 
     @patch('urllib.request.urlopen')
-    def test_search_images(self, mock_urlopen):
-        """Test searching for images."""
-        # Setup mock responses
-        mock_response = MagicMock()
-        mock_response.read.side_effect = [
-            json.dumps(self.mock_catalog_response).encode('utf-8'),  # Catalog response
-            json.dumps(self.mock_tags_response).encode('utf-8'),     # Tags for test/image1
-            json.dumps(self.mock_manifest_response).encode('utf-8'), # Manifest for test/image1:latest
-            json.dumps(self.mock_tags_response).encode('utf-8'),     # Tags for test/image2
-            json.dumps(self.mock_manifest_response).encode('utf-8')  # Manifest for test/image2:latest
-        ]
-        mock_urlopen.return_value.__enter__.return_value = mock_response
-        
-        client = NexusDockerSearch(self.nexus_url, self.repository)
-        results = client.search_images(["test/.*"])
-        
-        # Verify results
-        self.assertEqual(len(results), 2)  # Should match test/image1 and test/image2
-        self.assertEqual(results[0]["name"], "test/image1")
-        self.assertEqual(results[0]["version"], "latest")
-        self.assertEqual(results[0]["sha256"], "1234567890abcdef")
-        self.assertEqual(results[1]["name"], "test/image2")
-        self.assertEqual(results[1]["version"], "latest")
-        self.assertEqual(results[1]["sha256"], "1234567890abcdef")
-
-    @patch('urllib.request.urlopen')
-    def test_get_image_tags(self, mock_urlopen):
-        """Test getting tags for an image."""
+    def test_search_images_single_pattern(self, mock_urlopen):
         # Setup mock response
         mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps(self.mock_tags_response).encode('utf-8')
+        mock_response.read.return_value = json.dumps(self.mock_single_pattern_response).encode('utf-8')
         mock_urlopen.return_value.__enter__.return_value = mock_response
         
-        client = NexusDockerSearch(self.nexus_url, self.repository)
-        tags = client.get_image_tags("test/image1")
+        # Initialize client
+        client = NexusDockerSearch(
+            self.nexus_url,
+            self.repository,
+            self.username,
+            self.password,
+            verbose=self.verbose
+        )
         
-        # Verify tags
-        self.assertEqual(tags, ["latest", "v1.0", "v1.1"])
+        # Test single pattern search
+        results = client.search_images(["test/image.*"])
+        
+        # Verify results
+        self.assertEqual(len(results), 2)
+        
+        # Verify first image
+        self.assertEqual(results[0]["name"], "test/image1")
+        self.assertEqual(results[0]["version"], "latest")
+        self.assertEqual(results[0]["sha256"], "abc123")
+        
+        # Verify second image
+        self.assertEqual(results[1]["name"], "test/image2")
+        self.assertEqual(results[1]["version"], "v1.0")
+        self.assertEqual(results[1]["sha256"], "def456")
+        
+        # Verify URL was called with correct parameters
+        mock_urlopen.assert_called_once()
+        call_args = mock_urlopen.call_args[0][0]
+        parsed_url = urllib.parse.urlparse(call_args.full_url)
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        self.assertEqual(query_params["name"][0], "test/image.*")
+        self.assertEqual(query_params["repository"][0], "docker-hosted")
+        self.assertEqual(query_params["format"][0], "docker")
+
+    @patch('urllib.request.urlopen')
+    def test_search_images_multiple_patterns(self, mock_urlopen):
+        # Setup mock response
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(self.mock_multiple_pattern_response).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+        
+        # Initialize client
+        client = NexusDockerSearch(
+            self.nexus_url,
+            self.repository,
+            self.username,
+            self.password,
+            verbose=self.verbose
+        )
+        
+        # Test multiple pattern search
+        results = client.search_images(["test/image1", "test/image2"])
+        
+        # Verify results
+        self.assertEqual(len(results), 2)
+        
+        # Verify first image
+        self.assertEqual(results[0]["name"], "test/image1")
+        self.assertEqual(results[0]["version"], "latest")
+        self.assertEqual(results[0]["sha256"], "abc123")
+        
+        # Verify second image
+        self.assertEqual(results[1]["name"], "test/image2")
+        self.assertEqual(results[1]["version"], "v1.0")
+        self.assertEqual(results[1]["sha256"], "def456")
+        
+        # Verify URL was called with correct parameters
+        mock_urlopen.assert_called_once()
+        call_args = mock_urlopen.call_args[0][0]
+        parsed_url = urllib.parse.urlparse(call_args.full_url)
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        self.assertNotIn("name", query_params)  # No name parameter for multiple patterns
+        self.assertEqual(query_params["repository"][0], "docker-hosted")
+        self.assertEqual(query_params["format"][0], "docker")
+
+    @patch('urllib.request.urlopen')
+    def test_search_images_no_matches(self, mock_urlopen):
+        # Setup mock response with no matches
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"items": []}).encode('utf-8')
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+        
+        # Initialize client
+        client = NexusDockerSearch(
+            self.nexus_url,
+            self.repository,
+            self.username,
+            self.password,
+            verbose=self.verbose
+        )
+        
+        # Test search with no matches
+        results = client.search_images(["nonexistent/image"])
+        
+        # Verify no results
+        self.assertEqual(len(results), 0)
+        
+        # Verify URL was called with correct parameters
+        mock_urlopen.assert_called_once()
+        call_args = mock_urlopen.call_args[0][0]
+        parsed_url = urllib.parse.urlparse(call_args.full_url)
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        self.assertEqual(query_params["name"][0], "nonexistent/image")
+        self.assertEqual(query_params["repository"][0], "docker-hosted")
+        self.assertEqual(query_params["format"][0], "docker")
+
+    @patch('urllib.request.urlopen')
+    def test_search_images_error_handling(self, mock_urlopen):
+        # Setup mock to raise an exception
+        mock_urlopen.side_effect = Exception("Test error")
+        
+        # Initialize client
+        client = NexusDockerSearch(
+            self.nexus_url,
+            self.repository,
+            self.username,
+            self.password,
+            verbose=self.verbose
+        )
+        
+        # Test error handling
+        results = client.search_images(["test/image"])
+        
+        # Verify empty results on error
+        self.assertEqual(len(results), 0)
 
     @patch('urllib.request.urlopen')
     def test_http_error_handling(self, mock_urlopen):
