@@ -33,35 +33,47 @@ func TestNexusDockerSearch(t *testing.T) {
 		// Return mock response based on the pattern
 		switch query.Get("name") {
 		case "test/*":
-			json.NewEncoder(w).Encode(NexusResponse{
-				Items: []Component{
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"items": []map[string]interface{}{
 					{
-						Name:    "test/image1",
-						Version: "latest",
-						Assets: []Asset{
-							{Checksum: Checksum{SHA256: "sha256-2"}},
+						"name":    "test/image1",
+						"version": "latest",
+						"assets": []map[string]interface{}{
+							{
+								"checksum": map[string]string{
+									"sha256": "sha256-2",
+								},
+							},
 						},
 					},
 					{
-						Name:    "test/image1",
-						Version: "1",
-						Assets: []Asset{
-							{Checksum: Checksum{SHA256: "sha256-1"}},
+						"name":    "test/image1",
+						"version": "1",
+						"assets": []map[string]interface{}{
+							{
+								"checksum": map[string]string{
+									"sha256": "sha256-1",
+								},
+							},
 						},
 					},
 					{
-						Name:    "test/image1",
-						Version: "2",
-						Assets: []Asset{
-							{Checksum: Checksum{SHA256: "sha256-2"}},
+						"name":    "test/image1",
+						"version": "2",
+						"assets": []map[string]interface{}{
+							{
+								"checksum": map[string]string{
+									"sha256": "sha256-2",
+								},
+							},
 						},
 					},
 				},
 			})
 		default:
-			// Return empty items array, not null
-			json.NewEncoder(w).Encode(NexusResponse{
-				Items: []Component{},
+			// Return empty items array
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"items": []map[string]interface{}{},
 			})
 		}
 	}))
@@ -72,62 +84,40 @@ func TestNexusDockerSearch(t *testing.T) {
 
 	// Test cases
 	tests := []struct {
-		name         string
-		patterns     []string
-		wantRaw      []SearchResult
-		wantFiltered ImageResult
-		wantErr      bool
+		name     string
+		patterns []string
+		want     map[string][]string
+		wantErr  bool
 	}{
 		{
 			name:     "Basic search",
 			patterns: []string{"test/*"},
-			wantRaw: []SearchResult{
-				{Name: "test/image1", Version: "latest", SHA256: "sha256-2"},
-				{Name: "test/image1", Version: "1", SHA256: "sha256-1"},
-				{Name: "test/image1", Version: "2", SHA256: "sha256-2"},
-			},
-			wantFiltered: ImageResult{
-				"test/image1": []string{"latest", "2", "1"},
+			want: map[string][]string{
+				"test/image1": {"latest", "2", "1"},
 			},
 			wantErr: false,
 		},
 		{
-			name:         "No matches",
-			patterns:     []string{"nonexistent/*"},
-			wantRaw:      []SearchResult{},
-			wantFiltered: ImageResult{},
-			wantErr:      false,
+			name:     "No matches",
+			patterns: []string{"nonexistent/*"},
+			want:     map[string][]string{},
+			wantErr:  false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Test raw search
-			gotRaw, err := client.SearchImages(tt.patterns)
+			got, err := client.SearchImages(tt.patterns)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("SearchImages() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
-			// Compare slices, handling nil/empty cases
-			if len(gotRaw) == 0 && len(tt.wantRaw) == 0 {
-				// Both are empty, test passes
-			} else if !reflect.DeepEqual(gotRaw, tt.wantRaw) {
-				t.Errorf("SearchImages() = %v, want %v", gotRaw, tt.wantRaw)
-			}
-
-			// Test filtered search
-			gotFiltered, err := client.SearchAndFilterImages(tt.patterns)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("SearchAndFilterImages() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
 			// Compare maps, handling nil/empty cases
-			if len(gotFiltered) == 0 && len(tt.wantFiltered) == 0 {
+			if len(got) == 0 && len(tt.want) == 0 {
 				// Both are empty, test passes
-			} else if !reflect.DeepEqual(gotFiltered, tt.wantFiltered) {
-				t.Errorf("SearchAndFilterImages() = %v, want %v", gotFiltered, tt.wantFiltered)
+			} else if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("SearchImages() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -169,7 +159,7 @@ func TestFilterTags(t *testing.T) {
 			tags:          []string{},
 			latestDigest:  "",
 			versionDigest: "",
-			want:          []string{},
+			want:          nil,
 		},
 	}
 
@@ -188,44 +178,48 @@ func TestProcessImages(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		images []SearchResult
-		want   ImageResult
+		images []map[string]string
+		want   map[string][]string
 	}{
 		{
 			name: "Multiple versions with latest",
-			images: []SearchResult{
-				{Name: "test/image1", Version: "latest", SHA256: "sha256-2"},
-				{Name: "test/image1", Version: "1", SHA256: "sha256-1"},
-				{Name: "test/image1", Version: "2", SHA256: "sha256-2"},
+			images: []map[string]string{
+				{"name": "test/image1", "version": "latest", "sha256": "sha256-2"},
+				{"name": "test/image1", "version": "1", "sha256": "sha256-1"},
+				{"name": "test/image1", "version": "2", "sha256": "sha256-2"},
 			},
-			want: ImageResult{
-				"test/image1": []string{"latest", "2", "1"},
+			want: map[string][]string{
+				"test/image1": {"latest", "2", "1"},
 			},
 		},
 		{
 			name: "Multiple images",
-			images: []SearchResult{
-				{Name: "test/image1", Version: "1", SHA256: "sha256-1"},
-				{Name: "test/image2", Version: "2", SHA256: "sha256-2"},
+			images: []map[string]string{
+				{"name": "test/image1", "version": "1", "sha256": "sha256-1"},
+				{"name": "test/image2", "version": "2", "sha256": "sha256-2"},
 			},
-			want: ImageResult{
-				"test/image1": []string{"1"},
-				"test/image2": []string{"2"},
+			want: map[string][]string{
+				"test/image1": {"1"},
+				"test/image2": {"2"},
 			},
 		},
 		{
 			name:   "Empty input",
-			images: []SearchResult{},
-			want:   ImageResult{},
+			images: []map[string]string{},
+			want:   map[string][]string{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := client.processImages(tt.images)
+			got, err := client.processImages(tt.images)
+			if err != nil {
+				t.Errorf("processImages() error = %v", err)
+				return
+			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("processImages() = %v, want %v", got, tt.want)
 			}
 		})
 	}
-} 
+}

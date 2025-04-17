@@ -7,117 +7,79 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
-	"net/url"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-// NexusDockerSearch represents a client for searching Docker images in Nexus
+// NexusDockerSearch represents a client for searching Docker images in a Nexus repository
 type NexusDockerSearch struct {
-	nexusURL    string
-	repository  string
-	username    string
-	password    string
-	verifySSL   bool
-	verbose     bool
-	authHeader  string
-	httpClient  *http.Client
-}
-
-// SearchResult represents a Docker image search result
-type SearchResult struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	SHA256  string `json:"sha256"`
-}
-
-// ImageResult represents the final filtered result for each image
-type ImageResult map[string][]string
-
-// NexusResponse represents the response from Nexus search API
-type NexusResponse struct {
-	Items             []Component `json:"items"`
-	ContinuationToken string     `json:"continuationToken"`
-}
-
-// Component represents a Nexus component
-type Component struct {
-	Name    string  `json:"name"`
-	Version string  `json:"version"`
-	Assets  []Asset `json:"assets"`
-	Tags    []string
-}
-
-// Asset represents a Nexus asset
-type Asset struct {
-	Checksum Checksum `json:"checksum"`
-}
-
-// Checksum represents a Nexus asset checksum
-type Checksum struct {
-	SHA256 string `json:"sha256"`
+	nexusURL   string
+	repository string
+	username   string
+	password   string
+	verifySSL  bool
+	verbose    bool
+	authHeader string
+	httpClient *http.Client
 }
 
 // NewNexusDockerSearch creates a new NexusDockerSearch client
 func NewNexusDockerSearch(nexusURL, repository, username, password string, verifySSL, verbose bool) *NexusDockerSearch {
-	client := &NexusDockerSearch{
+	// Create HTTP client with SSL configuration
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: !verifySSL,
+		},
+	}
+	client := &http.Client{Transport: transport}
+
+	// Create basic auth header if credentials are provided
+	var authHeader string
+	if username != "" && password != "" {
+		auth := username + ":" + password
+		authHeader = "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
+	}
+
+	return &NexusDockerSearch{
 		nexusURL:   strings.TrimRight(nexusURL, "/") + "/service/rest/v1/search",
 		repository: repository,
 		username:   username,
 		password:   password,
 		verifySSL:  verifySSL,
 		verbose:    verbose,
+		authHeader: authHeader,
+		httpClient: client,
 	}
-
-	// Set up HTTP client with SSL verification settings
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: !verifySSL},
-	}
-	client.httpClient = &http.Client{Transport: tr}
-
-	// Set up basic auth if credentials are provided
-	if username != "" && password != "" {
-		credentials := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", username, password)))
-		client.authHeader = fmt.Sprintf("Basic %s", credentials)
-	}
-
-	if verbose {
-		log.Printf("Initializing Nexus Docker Search client")
-		log.Printf("URL: %s", client.nexusURL)
-		log.Printf("Repository: %s", client.repository)
-		log.Printf("Authentication: %s", map[bool]string{true: "enabled", false: "disabled"}[username != "" && password != ""])
-		log.Printf("SSL Verification: %s", map[bool]string{true: "enabled", false: "disabled"}[verifySSL])
-	}
-
-	return client
 }
 
-// makeRequest makes an HTTP GET request with authentication
-func (n *NexusDockerSearch) makeRequest(params url.Values) (*NexusResponse, error) {
-	reqURL := n.nexusURL
+// makeRequest performs an HTTP GET request with authentication
+func (n *NexusDockerSearch) makeRequest(url string, params map[string]string) (map[string]interface{}, error) {
+	// Add query parameters to URL
 	if len(params) > 0 {
-		reqURL += "?" + params.Encode()
+		query := make([]string, 0, len(params))
+		for k, v := range params {
+			query = append(query, fmt.Sprintf("%s=%s", k, v))
+		}
+		url = url + "?" + strings.Join(query, "&")
 	}
 
 	if n.verbose {
-		log.Printf("Making request to: %s", reqURL)
+		fmt.Printf("Making request to: %s\n", url)
 		if len(params) > 0 {
-			log.Printf("Query parameters: %v", params)
+			fmt.Printf("Query parameters: %v\n", params)
 		}
 	}
 
-	req, err := http.NewRequest("GET", reqURL, nil)
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
 
 	if n.authHeader != "" {
-		req.Header.Set("Authorization", n.authHeader)
+		req.Header.Add("Authorization", n.authHeader)
 	}
 
 	resp, err := n.httpClient.Do(req)
@@ -126,52 +88,156 @@ func (n *NexusDockerSearch) makeRequest(params url.Values) (*NexusResponse, erro
 	}
 	defer resp.Body.Close()
 
-	if n.verbose {
-		log.Printf("Response status: %d", resp.StatusCode)
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, resp.Status)
 	}
 
-	var result NexusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %v", err)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %v", err)
 	}
 
-	return &result, nil
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON response: %v", err)
+	}
+
+	return result, nil
+}
+
+// SearchImages searches for Docker images matching the given patterns
+func (n *NexusDockerSearch) SearchImages(patterns []string) (map[string][]string, error) {
+	if n.verbose {
+		fmt.Printf("Searching for patterns: %v\n", patterns)
+	}
+
+	// Build base search parameters
+	baseParams := map[string]string{
+		"repository": n.repository,
+		"format":     "docker",
+	}
+
+	// Get all components for each pattern
+	matchingImages := make([]map[string]string, 0)
+	seenImages := make(map[string]bool) // Track unique images by name:version
+
+	for _, pattern := range patterns {
+		if n.verbose {
+			fmt.Printf("Searching with pattern: %s\n", pattern)
+		}
+
+		// Add pattern to parameters
+		params := make(map[string]string)
+		for k, v := range baseParams {
+			params[k] = v
+		}
+		params["name"] = pattern
+
+		continuationToken := ""
+		for {
+			if continuationToken != "" {
+				params["continuationToken"] = continuationToken
+				if n.verbose {
+					fmt.Printf("Fetching next page with token: %s\n", continuationToken)
+				}
+			}
+
+			data, err := n.makeRequest(n.nexusURL, params)
+			if err != nil {
+				return nil, fmt.Errorf("search failed: %v", err)
+			}
+
+			items, ok := data["items"].([]interface{})
+			if !ok {
+				return nil, fmt.Errorf("invalid response format: items not found")
+			}
+
+			if n.verbose {
+				fmt.Printf("Found %d components in current page\n", len(items))
+			}
+
+			// Process components
+			for _, item := range items {
+				component, ok := item.(map[string]interface{})
+				if !ok {
+					continue
+				}
+
+				name, _ := component["name"].(string)
+				version, _ := component["version"].(string)
+				imageKey := name + ":" + version
+
+				// Skip if we've already seen this image:version
+				if seenImages[imageKey] {
+					if n.verbose {
+						fmt.Printf("Skipping duplicate image: %s\n", imageKey)
+					}
+					continue
+				}
+
+				seenImages[imageKey] = true
+				if n.verbose {
+					fmt.Printf("Found image: %s\n", name)
+				}
+
+				// Get SHA256 from assets
+				assets, _ := component["assets"].([]interface{})
+				var sha256 string
+				if len(assets) > 0 {
+					asset, _ := assets[0].(map[string]interface{})
+					checksum, _ := asset["checksum"].(map[string]interface{})
+					sha256, _ = checksum["sha256"].(string)
+				}
+
+				matchingImages = append(matchingImages, map[string]string{
+					"name":    name,
+					"version": version,
+					"sha256":  sha256,
+				})
+			}
+
+			// Check if there are more results
+			if token, ok := data["continuationToken"].(string); ok && token != "" {
+				continuationToken = token
+			} else {
+				if n.verbose {
+					fmt.Println("No more pages to fetch")
+				}
+				break
+			}
+		}
+	}
+
+	if n.verbose {
+		fmt.Printf("Total matching images found: %d\n", len(matchingImages))
+	}
+
+	// Process and filter the images
+	return n.processImages(matchingImages)
 }
 
 // filterTags filters and sorts tags for an image
 func (n *NexusDockerSearch) filterTags(tags []string, latestDigest, versionDigest string) []string {
 	if len(tags) == 0 {
-		return tags
+		return nil
 	}
 
-	// Separate latest tag from version tags
+	// Separate latest tag from other tags
 	var versionTags []string
-	hasLatest := false
 	for _, tag := range tags {
-		if tag == "latest" {
-			hasLatest = true
-		} else {
+		if tag != "latest" {
 			versionTags = append(versionTags, tag)
 		}
 	}
 
 	// Sort version tags numerically
 	sort.Slice(versionTags, func(i, j int) bool {
-		// Try to convert to integers for comparison
-		iNum, iErr := strconv.Atoi(versionTags[i])
-		jNum, jErr := strconv.Atoi(versionTags[j])
-		
-		// If both are numbers, compare numerically
-		if iErr == nil && jErr == nil {
-			return iNum > jNum
+		numI, errI := strconv.Atoi(versionTags[i])
+		numJ, errJ := strconv.Atoi(versionTags[j])
+		if errI != nil || errJ != nil {
+			return false
 		}
-		// Otherwise, use string comparison
-		return versionTags[i] > versionTags[j]
+		return numI > numJ
 	})
 
 	// Take only the last 2 valid tags
@@ -180,301 +246,114 @@ func (n *NexusDockerSearch) filterTags(tags []string, latestDigest, versionDiges
 	}
 
 	// If latest tag exists and matches the highest version, include it
-	if hasLatest && latestDigest != "" && versionDigest != "" && latestDigest == versionDigest {
-		return append([]string{"latest"}, versionTags...)
+	for _, tag := range tags {
+		if tag == "latest" && latestDigest != "" && versionDigest != "" {
+			if latestDigest == versionDigest {
+				return append([]string{"latest"}, versionTags...)
+			}
+		}
 	}
 
 	return versionTags
 }
 
 // processImages processes a list of images and their tags
-func (n *NexusDockerSearch) processImages(images []SearchResult) ImageResult {
+func (n *NexusDockerSearch) processImages(images []map[string]string) (map[string][]string, error) {
 	if n.verbose {
-		log.Printf("Processing and filtering image tags")
+		fmt.Println("Processing and filtering image tags")
 	}
 
 	// Group images by name
-	imageGroups := make(map[string][]SearchResult)
-	for _, img := range images {
-		imageGroups[img.Name] = append(imageGroups[img.Name], img)
+	imageGroups := make(map[string][]map[string]string)
+	for _, image := range images {
+		name := image["name"]
+		imageGroups[name] = append(imageGroups[name], image)
 	}
 
 	// Process each group
-	results := make(ImageResult)
+	results := make(map[string][]string)
 	for name, versions := range imageGroups {
 		if n.verbose {
-			log.Printf("Processing tags for image: %s", name)
+			fmt.Printf("Processing tags for image: %s\n", name)
 		}
 
 		// Get all versions and their digests
 		var tags []string
 		var latestDigest, versionDigest string
-		var highestVersion int = -1
+		var highestVersion int
 
-		for _, ver := range versions {
-			tags = append(tags, ver.Version)
+		for _, versionInfo := range versions {
+			version := versionInfo["version"]
+			sha256 := versionInfo["sha256"]
+			tags = append(tags, version)
 
-			if ver.Version == "latest" {
-				latestDigest = ver.SHA256
-			} else if num, err := strconv.Atoi(ver.Version); err == nil {
-				if num > highestVersion {
-					highestVersion = num
-					versionDigest = ver.SHA256
+			if version == "latest" {
+				latestDigest = sha256
+			} else {
+				if versionNum, err := strconv.Atoi(version); err == nil {
+					if versionNum > highestVersion {
+						highestVersion = versionNum
+						versionDigest = sha256
+					}
 				}
 			}
 		}
 
 		// Filter and sort tags
 		filteredTags := n.filterTags(tags, latestDigest, versionDigest)
-
-		if n.verbose {
-			log.Printf("Filtered tags for %s: %v", name, filteredTags)
-		}
-
-		results[name] = filteredTags
-	}
-
-	return results
-}
-
-// SearchImages searches for Docker images matching the given patterns
-func (n *NexusDockerSearch) SearchImages(patterns []string) ([]SearchResult, error) {
-	if n.verbose {
-		log.Printf("Searching for patterns: %v", patterns)
-	}
-
-	var matchingImages []SearchResult
-	seenImages := make(map[string]bool)
-
-	for _, pattern := range patterns {
-		if n.verbose {
-			log.Printf("Searching with pattern: %s", pattern)
-		}
-
-		params := url.Values{
-			"repository": {n.repository},
-			"format":     {"docker"},
-			"name":       {pattern},
-		}
-
-		continuationToken := ""
-		for {
-			if continuationToken != "" {
-				params.Set("continuationToken", continuationToken)
-				if n.verbose {
-					log.Printf("Fetching next page with token: %s", continuationToken)
-				}
-			}
-
-			data, err := n.makeRequest(params)
-			if err != nil {
-				if n.verbose {
-					log.Printf("Failed to search images: %v", err)
-				}
-				return nil, err
-			}
-
-			if n.verbose {
-				log.Printf("Found %d components in current page", len(data.Items))
-			}
-
-			for _, component := range data.Items {
-				imageKey := fmt.Sprintf("%s:%s", component.Name, component.Version)
-
-				if seenImages[imageKey] {
-					if n.verbose {
-						log.Printf("Skipping duplicate image: %s", imageKey)
-					}
-					continue
-				}
-
-				seenImages[imageKey] = true
-				if n.verbose {
-					log.Printf("Found image: %s", component.Name)
-				}
-
-				var sha256 string
-				if len(component.Assets) > 0 {
-					sha256 = component.Assets[0].Checksum.SHA256
-				}
-
-				matchingImages = append(matchingImages, SearchResult{
-					Name:    component.Name,
-					Version: component.Version,
-					SHA256:  sha256,
-				})
-			}
-
-			if data.ContinuationToken == "" {
-				if n.verbose {
-					log.Printf("No more pages to fetch")
-				}
-				break
-			}
-			continuationToken = data.ContinuationToken
+		if len(filteredTags) > 0 {
+			results[name] = filteredTags
 		}
 	}
 
-	if n.verbose {
-		log.Printf("Total matching images found: %d", len(matchingImages))
-	}
-
-	return matchingImages, nil
-}
-
-// SearchAndFilterImages searches for Docker images and filters their tags in one operation
-func (n *NexusDockerSearch) SearchAndFilterImages(patterns []string) (ImageResult, error) {
-	if n.verbose {
-		log.Printf("Starting combined search and filter operation")
-	}
-
-	// First search for images
-	images, err := n.SearchImages(patterns)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(images) == 0 {
-		if n.verbose {
-			log.Printf("No images found matching the patterns")
-		}
-		return ImageResult{}, nil
-	}
-
-	// Then process and filter the tags
-	return n.processImages(images), nil
+	return results, nil
 }
 
 func main() {
-	// Define a custom flag set to stop parsing at first non-flag argument
-	flagSet := flag.NewFlagSet("nexus-docker-search", flag.ExitOnError)
+	// Parse command line arguments
+	url := flag.String("url", "", "Nexus server URL")
+	repository := flag.String("repository", "", "Docker repository name")
+	username := flag.String("username", "", "Nexus username")
+	password := flag.String("password", "", "Nexus password")
+	noVerifySSL := flag.Bool("no-verify-ssl", false, "Disable SSL certificate verification")
+	verbose := flag.Bool("verbose", false, "Enable verbose logging")
+	output := flag.String("output", "", "Output file path")
+	flag.Parse()
 
-	nexusURL := flagSet.String("url", "http://localhost:8081", "Nexus server URL")
-	repository := flagSet.String("repository", "my-private-docker-repo", "Docker repository name")
-	username := flagSet.String("username", "", "Nexus username")
-	password := flagSet.String("password", "", "Nexus password")
-	verifySSL := flagSet.Bool("verify-ssl", true, "Verify SSL certificates")
-	verbose := flagSet.Bool("verbose", false, "Enable verbose logging")
-	raw := flagSet.Bool("raw", false, "Output raw search results without filtering")
-	outputFile := flagSet.String("o", "", "Output file for results (JSON format)")
-
-	// Parse flags until first non-flag argument
-	if err := flagSet.Parse(os.Args[1:]); err != nil {
-		fmt.Printf("Error parsing flags: %v\n", err)
-		flagSet.Usage()
-		os.Exit(1)
-	}
-
-	// Set up logging
-	if *verbose {
-		log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-		log.SetPrefix("DEBUG: ")
-	}
-
-	if *nexusURL == "" {
-		fmt.Println("Error: Nexus URL is required")
-		flagSet.Usage()
-		os.Exit(1)
-	}
-
-	// Get patterns from remaining arguments
-	patterns := flagSet.Args()
+	patterns := flag.Args()
 	if len(patterns) == 0 {
-		fmt.Println("Error: At least one search pattern is required")
-		flagSet.Usage()
+		fmt.Println("Error: at least one pattern is required")
 		os.Exit(1)
 	}
 
-	if *verbose {
-		fmt.Println("Starting Nexus Docker Search...")
-		fmt.Printf("URL: %s\n", *nexusURL)
-		fmt.Printf("Repository: %s\n", *repository)
-		fmt.Printf("Patterns: %v\n", patterns)
-		if !*verifySSL {
-			fmt.Println("SSL certificate verification is disabled")
-		}
-		if *username != "" && *password != "" {
-			fmt.Println("Authentication is enabled")
-		} else {
-			fmt.Println("Authentication is disabled")
-		}
-		if *outputFile != "" {
-			fmt.Printf("Output will be saved to: %s\n", *outputFile)
-		}
+	if *url == "" || *repository == "" {
+		fmt.Println("Error: --url and --repository are required")
+		os.Exit(1)
 	}
 
-	client := NewNexusDockerSearch(*nexusURL, *repository, *username, *password, *verifySSL, *verbose)
+	// Initialize client
+	client := NewNexusDockerSearch(*url, *repository, *username, *password, !*noVerifySSL, *verbose)
 
-	var output interface{}
-	if *raw {
-		// Get raw search results
-		results, err := client.SearchImages(patterns)
-		if err != nil {
-			fmt.Printf("Error searching images: %v\n", err)
+	// Search for images
+	results, err := client.SearchImages(patterns)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Output results
+	jsonData, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *output != "" {
+		if err := os.WriteFile(*output, jsonData, 0644); err != nil {
+			fmt.Printf("Error writing to file: %v\n", err)
 			os.Exit(1)
-		}
-
-		output = results
-		fmt.Printf("\nFound %d matching images:\n", len(results))
-		for _, result := range results {
-			fmt.Printf("\nImage: %s\n", result.Name)
-			fmt.Printf("Version: %s\n", result.Version)
-			fmt.Printf("SHA256: %s\n", result.SHA256)
 		}
 	} else {
-		// Get filtered results
-		results, err := client.SearchAndFilterImages(patterns)
-		if err != nil {
-			fmt.Printf("Error searching and filtering images: %v\n", err)
-			os.Exit(1)
-		}
-
-		output = results
-		fmt.Printf("\nFound %d matching images:\n", len(results))
-		for name, tags := range results {
-			fmt.Printf("\nImage: %s\n", name)
-			fmt.Printf("Tags: %s\n", strings.Join(tags, ", "))
-		}
+		fmt.Println(string(jsonData))
 	}
-
-	// Save to file if specified
-	if *outputFile != "" {
-		// Convert output to JSON
-		jsonData, err := json.MarshalIndent(output, "", "  ")
-		if err != nil {
-			fmt.Printf("Error encoding results to JSON: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Ensure the file ends with a newline
-		jsonData = append(jsonData, '\n')
-
-		// Get absolute path for better error reporting
-		absPath, err := filepath.Abs(*outputFile)
-		if err != nil {
-			fmt.Printf("Error resolving output file path: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Create the directory if it doesn't exist
-		dir := filepath.Dir(absPath)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			fmt.Printf("Error creating directory %s: %v\n", dir, err)
-			os.Exit(1)
-		}
-
-		// Write the file
-		if err := os.WriteFile(absPath, jsonData, 0644); err != nil {
-			fmt.Printf("Error writing to file %s: %v\n", absPath, err)
-			os.Exit(1)
-		}
-
-		fmt.Printf("\nResults saved to %s\n", absPath)
-		
-		// Verify the file was created
-		if _, err := os.Stat(absPath); err != nil {
-			fmt.Printf("Error: Failed to verify file creation at %s: %v\n", absPath, err)
-			os.Exit(1)
-		}
-	}
-} 
+}
